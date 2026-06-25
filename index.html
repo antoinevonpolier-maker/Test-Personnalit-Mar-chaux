@@ -836,20 +836,29 @@ const App = (() => {
     try{ localStorage.setItem(STORAGE_KEY, JSON.stringify(all)); }
     catch(e){ console.warn("Stockage impossible", e); }
 
-    // Envoi centralisé à Supabase (en plus du localStorage, qui sert de filet de secours)
-    const row = {
-      marechal: best.nom,
-      initiative: scores.initiative,
-      innovation: scores.innovation,
-      ambition: scores.ambition,
-      centralisation: scores.centralisation,
-      duree_s: duree,
-      lang: LANG,
-    };
-    QUESTIONS.forEach((q,qi)=>{
-      row["q"+(qi+1)] = answers[qi] ? (answers[qi].delta>0?"+":"") + answers[qi].delta : "";
-    });
-    supabaseInsert(row);   // asynchrone, ne bloque pas l'affichage du résultat
+    // Envoi centralisé à Supabase (en plus du localStorage, qui sert de filet de secours).
+    // Filtre anti-clic-rapide : on n'envoie PAS si le quiz a été expédié trop vite
+    // (moins de 3 secondes par question en moyenne, soit moins de 24 s au total).
+    // Le résultat s'affiche quand même pour le visiteur ; seule la collecte est ignorée.
+    const SECONDS_PER_QUESTION_MIN = 3;
+    const minTotal = SECONDS_PER_QUESTION_MIN * QUESTIONS.length;   // 3 × 8 = 24 s
+    if(duree >= minTotal){
+      const row = {
+        marechal: best.nom,
+        initiative: scores.initiative,
+        innovation: scores.innovation,
+        ambition: scores.ambition,
+        centralisation: scores.centralisation,
+        duree_s: duree,
+        lang: LANG,
+      };
+      QUESTIONS.forEach((q,qi)=>{
+        row["q"+(qi+1)] = answers[qi] ? (answers[qi].delta>0?"+":"") + answers[qi].delta : "";
+      });
+      supabaseInsert(row);   // asynchrone, ne bloque pas l'affichage du résultat
+    } else {
+      console.info("Quiz trop rapide ("+duree+"s) : non envoyé aux statistiques.");
+    }
   }
 
   /* ================== ADMINISTRATION ================== */

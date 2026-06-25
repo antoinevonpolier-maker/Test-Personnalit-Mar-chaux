@@ -366,6 +366,42 @@
 const ADMIN_PASSWORD = "invalides2027";       // <-- à changer si besoin
 const STORAGE_KEY     = "quiz_marechaux_v1";   // clé localStorage
 
+/* ---------- Configuration Supabase (collecte centralisée en ligne) ---------- */
+const SUPABASE_URL  = "https://ciqmdgcmbepodyahmlju.supabase.co";
+const SUPABASE_KEY  = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImNpcW1kZ2NtYmVwb2R5YWhtbGp1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODIzOTA1MjYsImV4cCI6MjA5Nzk2NjUyNn0.ckETRHWDQN1TVElsZEQu46LHB7FYEi5Eq1wxxkhhpMI";
+const SUPABASE_TABLE = "quiz_responses";
+const SUPABASE_OK = SUPABASE_URL.startsWith("https://") && SUPABASE_KEY.length > 20;
+
+/* Envoie une réponse à Supabase (ne bloque pas le quiz si ça échoue) */
+async function supabaseInsert(row){
+  if(!SUPABASE_OK) return false;
+  try{
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/${SUPABASE_TABLE}`, {
+      method:"POST",
+      headers:{
+        "apikey": SUPABASE_KEY,
+        "Authorization": "Bearer " + SUPABASE_KEY,
+        "Content-Type": "application/json",
+        "Prefer": "return=minimal"
+      },
+      body: JSON.stringify(row)
+    });
+    return res.ok;
+  }catch(e){ console.warn("Supabase insert KO", e); return false; }
+}
+
+/* Récupère toutes les réponses depuis Supabase (pour le panneau admin) */
+async function supabaseFetchAll(){
+  if(!SUPABASE_OK) return null;
+  try{
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/${SUPABASE_TABLE}?select=*&order=created_at.desc`, {
+      headers:{ "apikey": SUPABASE_KEY, "Authorization": "Bearer " + SUPABASE_KEY }
+    });
+    if(!res.ok) return null;
+    return await res.json();
+  }catch(e){ console.warn("Supabase fetch KO", e); return null; }
+}
+
 /* ---------- Données : axes ----------
    Convention (cohérente avec l'Excel et les profils) :
    réponse A pousse vers le PÔLE HAUT (valeur 100), réponse D vers 0.
@@ -799,6 +835,21 @@ const App = (() => {
     all.push(rec);
     try{ localStorage.setItem(STORAGE_KEY, JSON.stringify(all)); }
     catch(e){ console.warn("Stockage impossible", e); }
+
+    // Envoi centralisé à Supabase (en plus du localStorage, qui sert de filet de secours)
+    const row = {
+      marechal: best.nom,
+      initiative: scores.initiative,
+      innovation: scores.innovation,
+      ambition: scores.ambition,
+      centralisation: scores.centralisation,
+      duree_s: duree,
+      lang: LANG,
+    };
+    QUESTIONS.forEach((q,qi)=>{
+      row["q"+(qi+1)] = answers[qi] ? (answers[qi].delta>0?"+":"") + answers[qi].delta : "";
+    });
+    supabaseInsert(row);   // asynchrone, ne bloque pas l'affichage du résultat
   }
 
   /* ================== ADMINISTRATION ================== */
@@ -815,17 +866,26 @@ const App = (() => {
       document.getElementById("admin-dashboard").classList.remove("hidden");
       renderDashboard();
     } else {
-      document.getElementById("pw-err").textContent="Mot de passe incorrect.";
+      document.getElementById("pw-err").textContent = L({fr:"Mot de passe incorrect.",en:"Incorrect password."});
     }
   }
 
-  function renderDashboard(){
-    const data = loadAll();
+  async function renderDashboard(){
     const dash = document.getElementById("admin-dashboard");
-    if(data.length===0){
-      dash.innerHTML = `<h2>Tableau de bord</h2>
-        <div class="admin-empty">Aucune participation enregistrée pour le moment.</div>
-        <div class="admin-actions"><button class="back" onclick="App.show('intro')">‹ Retour au quiz</button></div>`;
+    // état de chargement
+    dash.innerHTML = `<h2>${L({fr:"Tableau de bord",en:"Dashboard"})}</h2>
+      <div class="admin-empty">${L({fr:"Chargement des données…",en:"Loading data…"})}</div>`;
+
+    // 1) tenter Supabase (données centralisées de tous les visiteurs)
+    let data = await supabaseFetchAll();
+    let source = "supabase";
+    // 2) repli sur localStorage si Supabase indisponible
+    if(data === null){ data = loadAll(); source = "local"; }
+
+    if(!data || data.length===0){
+      dash.innerHTML = `<h2>${L({fr:"Tableau de bord",en:"Dashboard"})}</h2>
+        <div class="admin-empty">${L({fr:"Aucune participation enregistrée pour le moment.",en:"No entries recorded yet."})}</div>
+        <div class="admin-actions"><button class="back" onclick="App.show('intro')" data-i18n="backToQuiz">${L(UI.backToQuiz)}</button></div>`;
       return;
     }
 
@@ -838,20 +898,32 @@ const App = (() => {
 
     // répartition réponses par question (par valeur choisie, stable malgré le mélange)
     const vals = ["+50","+25","-25","-50"];
-    const valLbl = { "+50":"Pôle haut ++", "+25":"Pôle haut +", "-25":"Pôle bas −", "-50":"Pôle bas −−" };
+    const valLbl = {
+      "+50":L({fr:"Pôle haut ++",en:"High pole ++"}),
+      "+25":L({fr:"Pôle haut +",en:"High pole +"}),
+      "-25":L({fr:"Pôle bas −",en:"Low pole −"}),
+      "-50":L({fr:"Pôle bas −−",en:"Low pole −−"})
+    };
     let qHtml="";
     for(let qi=0; qi<QUESTIONS.length; qi++){
       const cnt={"+50":0,"+25":0,"-25":0,"-50":0};
-      data.forEach(d=>{ const v=d["q"+(qi+1)]; if(cnt[v]!==undefined) cnt[v]++; });
+      let tot=0;
+      data.forEach(d=>{ const v=d["q"+(qi+1)]; if(cnt[v]!==undefined){ cnt[v]++; tot++; } });
+      const axe = AXES[QUESTIONS[qi].axe];
+      const axeLabel = L(axe.bas) + " ↔ " + L(axe.haut);
       qHtml += `<div class="qdist">
-        <div class="qd-title">Q${qi+1} · <em>${QUESTIONS[qi].label}</em> — ${QUESTIONS[qi].texte}</div>
+        <div class="qd-title">Q${qi+1} · <em>${axeLabel}</em> — ${L(QUESTIONS[qi].texte)}</div>
         <div class="qd-letters">${
-          vals.map(v=>`<div class="qd-letter"><div class="l">${valLbl[v]}</div><div class="n">${cnt[v]}</div></div>`).join("")
+          vals.map(v=>{
+            const pct = tot? Math.round(cnt[v]/tot*100) : 0;
+            return `<div class="qd-letter"><div class="l">${valLbl[v]}</div><div class="n">${cnt[v]} <span style="color:var(--gris);font-size:12px">(${pct}%)</span></div></div>`;
+          }).join("")
         }</div></div>`;
     }
 
     // temps moyen
-    const tMoy = Math.round(data.reduce((s,d)=>s+(d.duree_s||0),0)/data.length);
+    const durs = data.map(d=>d.duree_s||0).filter(x=>x>0);
+    const tMoy = durs.length ? Math.round(durs.reduce((s,x)=>s+x,0)/durs.length) : 0;
 
     let marHtml = marSorted.map(([nom,n])=>`
       <div class="bar-row">
@@ -860,54 +932,59 @@ const App = (() => {
         <span class="bn">${n} (${Math.round(n/data.length*100)}%)</span>
       </div>`).join("");
 
+    const sourceNote = source==="supabase"
+      ? L({fr:"Données en ligne (tous les visiteurs)",en:"Online data (all visitors)"})
+      : L({fr:"⚠ Données locales seulement (connexion en ligne indisponible)",en:"⚠ Local data only (online connection unavailable)"});
+
     dash.innerHTML = `
-      <h2>Tableau de bord</h2>
+      <h2>${L({fr:"Tableau de bord",en:"Dashboard"})}</h2>
       <div class="count-big">${data.length}</div>
-      <div class="count-lbl">participations enregistrées</div>
+      <div class="count-lbl">${L({fr:"participations enregistrées",en:"entries recorded"})}</div>
+      <div style="text-align:center;font-size:12px;color:var(--gris);margin:-6px 0 18px">${sourceNote}</div>
 
       <div class="stat-block">
-        <h3>Répartition des maréchaux</h3>
+        <h3>${L({fr:"Répartition des maréchaux",en:"Marshal distribution"})}</h3>
         ${marHtml}
       </div>
 
       <div class="stat-block">
-        <h3>Temps moyen de réponse</h3>
+        <h3>${L({fr:"Temps moyen de réponse",en:"Average completion time"})}</h3>
         <p style="text-align:center;font-size:26px;color:var(--bleu)">${tMoy} s
           <span style="font-size:14px;color:var(--gris)"> (~${Math.floor(tMoy/60)} min ${tMoy%60} s)</span></p>
       </div>
 
       <div class="stat-block">
-        <h3>Répartition des réponses par question</h3>
+        <h3>${L({fr:"Répartition des réponses par question",en:"Answer distribution per question"})}</h3>
         ${qHtml}
       </div>
 
       <div class="admin-actions">
-        <button class="btn" onclick="App.exportExcel()">Exporter en Excel</button>
-        <button class="btn secondary" onclick="App.exportCSV()">Exporter en CSV</button>
-        <button class="btn secondary" onclick="App.clearData()" style="border-color:var(--rouge);color:var(--rouge)">Effacer les données</button>
+        <button class="btn" onclick="App.exportExcel()">${L({fr:"Exporter en Excel",en:"Export to Excel"})}</button>
+        <button class="btn secondary" onclick="App.exportCSV()">${L({fr:"Exporter en CSV",en:"Export to CSV"})}</button>
       </div>
-      <div class="center" style="margin-top:16px"><button class="back" onclick="App.show('intro')">‹ Retour au quiz</button></div>
+      <div class="center" style="margin-top:16px"><button class="back" onclick="App.show('intro')">${L(UI.backToQuiz)}</button></div>
     `;
   }
 
   /* --- Export Excel (.xlsx) via SheetJS --- */
-  function exportExcel(){
-    const data = loadAll();
-    if(data.length===0){ alert("Aucune donnée à exporter."); return; }
+  async function exportExcel(){
+    let data = await supabaseFetchAll();
+    if(data === null) data = loadAll();
+    if(!data || data.length===0){ alert(L({fr:"Aucune donnée à exporter.",en:"No data to export."})); return; }
 
-    // Feuille 1 : réponses brutes
+    // Feuille 1 : réponses brutes (compatible Supabase + localStorage)
     const rows = data.map(d=>({
-      "ID":d.quiz_id, "Date":d.date,
+      "ID":d.quiz_id || d.id || "", "Date":d.date || d.created_at || "",
       "Initiative":d.initiative, "Innovation":d.innovation,
       "Ambition":d.ambition, "Centralisation":d.centralisation,
-      "Maréchal":d.marechal, "Durée (s)":d.duree_s,
+      "Maréchal":d.marechal, "Durée (s)":d.duree_s, "Langue":d.lang || "",
       "Q1":d.q1,"Q2":d.q2,"Q3":d.q3,"Q4":d.q4,"Q5":d.q5,"Q6":d.q6,"Q7":d.q7,"Q8":d.q8
     }));
     const ws1 = XLSX.utils.json_to_sheet(rows);
 
     // Feuille 2 : synthèse maréchaux
     const parMar={}; MARECHAUX.forEach(m=>parMar[m.nom]=0);
-    data.forEach(d=>parMar[d.marechal]++);
+    data.forEach(d=>parMar[d.marechal]=(parMar[d.marechal]||0)+1);
     const synth = Object.entries(parMar).map(([nom,n])=>({
       "Maréchal":nom, "Nombre":n,
       "Pourcentage": data.length? (Math.round(n/data.length*1000)/10)+" %":"0 %"
@@ -922,14 +999,20 @@ const App = (() => {
   }
 
   /* --- Export CSV (secours) --- */
-  function exportCSV(){
-    const data = loadAll();
-    if(data.length===0){ alert("Aucune donnée à exporter."); return; }
+  async function exportCSV(){
+    let data = await supabaseFetchAll();
+    if(data === null) data = loadAll();
+    if(!data || data.length===0){ alert(L({fr:"Aucune donnée à exporter.",en:"No data to export."})); return; }
     const cols=["quiz_id","date","initiative","innovation","ambition","centralisation",
-                "marechal","duree_s","q1","q2","q3","q4","q5","q6","q7","q8"];
+                "marechal","duree_s","lang","q1","q2","q3","q4","q5","q6","q7","q8"];
     const esc = v => `"${String(v??"").replace(/"/g,'""')}"`;
     let csv = cols.join(";") + "\n";
-    data.forEach(d=> csv += cols.map(c=>esc(d[c])).join(";") + "\n" );
+    data.forEach(d=>{
+      const row = Object.assign({}, d);
+      if(!row.date && row.created_at) row.date = row.created_at;
+      if(!row.quiz_id && row.id) row.quiz_id = row.id;
+      csv += cols.map(c=>esc(row[c])).join(";") + "\n";
+    });
     const blob = new Blob(["\ufeff"+csv], {type:"text/csv;charset=utf-8;"});
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");

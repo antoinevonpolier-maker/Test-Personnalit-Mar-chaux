@@ -849,6 +849,57 @@ const App = (() => {
     try{ return JSON.parse(localStorage.getItem(STORAGE_KEY)) || []; }
     catch(e){ return []; }
   }
+  /* ============== ENVOI SUPABASE (collecte des résultats) ============== */
+  /* ⚠️ À COMPLÉTER : colle ici l'URL de ton projet et ta clé "anon public"
+     (Dashboard Supabase → Settings → API). NE PAS mettre la clé service_role. */
+  const SUPABASE_URL = "https://ciqmdgcmbepodyahmlju.supabase.co";
+  const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImNpcW1kZ2NtYmVwb2R5YWhtbGp1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODIzOTA1MjYsImV4cCI6MjA5Nzk2NjUyNn0.ckETRHWDQN1TVElsZEQu46LHB7FYEi5Eq1wxxkhhpMI";
+  const DUREE_MIN_S = 24;   // filtre anti-triche : en dessous, on n'envoie pas
+
+  /* Envoie un enregistrement dans la table quiz_responses.
+     Format aligné sur le schéma : marechal, 4 axes, duree_s, q1..q8, lang.
+     Silencieux en cas d'échec (le résultat s'affiche quoi qu'il arrive). */
+  async function sendToSupabase(rec){
+    // Garde-fou : config non renseignée → on ne tente rien.
+    if(SUPABASE_URL.includes("TON-PROJET") || SUPABASE_ANON_KEY.includes("COLLE_ICI")){
+      console.warn("Supabase non configuré : envoi ignoré.");
+      return;
+    }
+    // Filtre anti-triche : trop rapide → on montre le résultat mais on n'enregistre pas.
+    if(rec.duree_s < DUREE_MIN_S){
+      console.info("Réponse trop rapide (" + rec.duree_s + "s) : non envoyée à Supabase.");
+      return;
+    }
+    const payload = {
+      marechal:       rec.marechal,
+      initiative:     rec.initiative,
+      innovation:     rec.innovation,
+      ambition:       rec.ambition,
+      centralisation: rec.centralisation,
+      duree_s:        rec.duree_s,
+      q1: rec.q1, q2: rec.q2, q3: rec.q3, q4: rec.q4,
+      q5: rec.q5, q6: rec.q6, q7: rec.q7, q8: rec.q8,
+      lang: LANG,
+    };
+    try{
+      const resp = await fetch(SUPABASE_URL + "/rest/v1/quiz_responses", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "apikey": SUPABASE_ANON_KEY,
+          "Authorization": "Bearer " + SUPABASE_ANON_KEY,
+          "Prefer": "return=minimal",
+        },
+        body: JSON.stringify(payload),
+      });
+      if(!resp.ok){
+        console.warn("Supabase a refusé l'envoi :", resp.status, await resp.text());
+      }
+    }catch(e){
+      console.warn("Envoi Supabase impossible (réseau ?) :", e);
+    }
+  }
+
   function saveResult(scores, best, duree){
     const all = loadAll();
     const rec = {
@@ -869,6 +920,7 @@ const App = (() => {
     all.push(rec);
     try{ localStorage.setItem(STORAGE_KEY, JSON.stringify(all)); }
     catch(e){ console.warn("Stockage impossible", e); }
+    sendToSupabase(rec);   // envoi vers la base (respecte le filtre anti-triche)
   }
 
   /* ================== ADMINISTRATION ================== */
